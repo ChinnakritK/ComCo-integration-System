@@ -1,0 +1,279 @@
+# =============================================================================
+# Kong Gateway OSS - declarative (DB-less) configuration
+#
+# This single file IS the API management layer: routes, consumers, credentials,
+# access control, rate limits, tracing and logging. It is version-controlled and
+# loaded at start-up (KONG_DECLARATIVE_CONFIG), so the gateway is reproducible
+# and reviewable like code.
+#
+#   Public contract             Upstream                    Allowed groups
+#   /api/v1/customers[/...]  -> customer-service /customers  external-clients, agents, customer-agents
+#   /api/v1/orders[/...]     -> order-service    /orders     external-clients, agents, order-readers, order-agents
+#   /api/v1/agent[/...]      -> coordinator-agent /agent     external-clients
+#
+# NOTE: API keys below are demo credentials for local evaluation only.
+# =============================================================================
+_format_version: "3.0"
+_transform: true
+
+# ----------------------------------------------------------------------------
+# Upstreams: active health checks let Kong stop routing to a dead backend and
+# answer immediately with 503 instead of waiting for a connect timeout.
+# ----------------------------------------------------------------------------
+upstreams:
+  - name: customer-service.upstream
+    algorithm: round-robin
+    healthchecks:
+      active:
+        type: http
+        http_path: /health
+        timeout: 2
+        healthy:
+          interval: 5
+          successes: 1
+        unhealthy:
+          interval: 5
+          http_failures: 2
+          tcp_failures: 2
+          timeouts: 2
+    targets:
+      - target: customer-service:8000
+
+  - name: order-service.upstream
+    algorithm: round-robin
+    healthchecks:
+      active:
+        type: http
+        http_path: /health
+        timeout: 2
+        healthy:
+          interval: 5
+          successes: 1
+        unhealthy:
+          interval: 5
+          http_failures: 2
+          tcp_failures: 2
+          timeouts: 2
+    targets:
+      - target: order-service:8000
+
+  - name: coordinator-agent.upstream
+    algorithm: round-robin
+    healthchecks:
+      active:
+        type: http
+        http_path: /health
+        timeout: 2
+        healthy:
+          interval: 5
+          successes: 1
+        unhealthy:
+          interval: 5
+          http_failures: 2
+          tcp_failures: 2
+          timeouts: 2
+    targets:
+      - target: coordinator-agent:8000
+
+# ----------------------------------------------------------------------------
+# Services & routes (versioned public paths decoupled from internal paths)
+# ----------------------------------------------------------------------------
+services:
+  - name: customer-service
+    host: customer-service.upstream
+    protocol: http
+    path: /customers
+    connect_timeout: 2000   # ms
+    read_timeout: 5000      # ms -> slower upstream = 504 from the gateway
+    write_timeout: 5000
+    retries: 1
+    tags: [customer, backend]
+    routes:
+      - name: customer-api
+        paths: [/api/v1/customers]
+        methods: [GET, POST]
+        strip_path: true
+    plugins:
+      - name: acl
+        config:
+          allow: [external-clients, agents, customer-agents]
+          hide_groups_header: true
+
+  - name: order-service
+    host: order-service.upstream
+    protocol: http
+    path: /orders
+    connect_timeout: 2000
+    read_timeout: 5000
+    write_timeout: 5000
+    retries: 1
+    tags: [order, backend]
+    routes:
+      - name: order-api
+        paths: [/api/v1/orders]
+        methods: [GET, POST, PATCH]
+        strip_path: true
+    plugins:
+      - name: acl
+        config:
+          allow: [external-clients, agents, order-readers, order-agents]
+          hide_groups_header: true
+
+  # Agent API: natural-language requests handled by the Coordinator Agent, which
+  # calls the Customer/Order APIs back THROUGH this gateway as consumer
+  # `agent-platform` (so agent traffic is authenticated, limited and traced too).
+  - name: coordinator-agent
+    host: coordinator-agent.upstream
+    protocol: http
+    path: /agent
+    connect_timeout: 2000
+    read_timeout: 30000     # an agent request fans out to several API calls
+    write_timeout: 5000
+    retries: 0              # never replay a non-idempotent agent request
+    tags: [agent]
+    routes:
+      - name: agent-api
+        paths: [/api/v1/agent]
+        methods: [GET, POST]
+        strip_path: true
+    plugins:
+      - name: acl
+        config:
+          allow: [external-clients]
+          hide_groups_header: true
+
+# ----------------------------------------------------------------------------
+# Consumers = API clients. Each gets its own key, ACL group and (optionally)
+# its own rate-limit tier. Consumer-scoped plugins override the global one.
+# ----------------------------------------------------------------------------
+consumers:
+  - username: demo-client            # standard external consumer, 60 req/min (global default)
+    custom_id: ext-demo-001
+    keyauth_credentials:
+      - key: demo-client-key
+    acls:
+      - group: external-clients
+
+  - username: trial-client           # low tier - used to demonstrate 429
+    custom_id: ext-trial-001
+    keyauth_credentials:
+      - key: trial-client-key
+    acls:
+      - group: external-clients
+    plugins:
+      - name: rate-limiting
+        config:
+          minute: 5
+          policy: local
+          limit_by: consumer
+          error_message: "Rate limit exceeded for your plan (5 requests/minute)."
+
+  - username: orders-partner         # may read orders but NOT customers -> demonstrates 403
+    custom_id: partner-001
+    keyauth_credentials:
+      - key: orders-partner-key
+    acls:
+      - group: order-readers
+
+  # --- Agent identities: each agent is a separate consumer (least privilege). ---
+  - username: customer-agent         # A2A Customer Agent: customer API only
+    custom_id: agent-customer
+    keyauth_credentials:
+      - key: customer-agent-key
+    acls:
+      - group: customer-agents
+    plugins:
+      - name: rate-limiting
+        config:
+          minute: 300
+          policy: local
+          limit_by: consumer
+
+  - username: order-agent            # A2A Order Agent: order API only
+    custom_id: agent-order
+    keyauth_credentials:
+      - key: order-agent-key
+    acls:
+      - group: order-agents
+    plugins:
+      - name: rate-limiting
+        config:
+          minute: 300
+          policy: local
+          limit_by: consumer
+
+  - username: agent-platform         # Coordinator in EXECUTION_MODE=direct (Phase 2 path)
+    custom_id: internal-agents
+    keyauth_credentials:
+      - key: agent-platform-key
+    acls:
+      - group: agents
+    plugins:
+      - name: rate-limiting
+        config:
+          minute: 300
+          policy: local
+          limit_by: consumer
+
+# ----------------------------------------------------------------------------
+# Global plugins - applied to every route
+# ----------------------------------------------------------------------------
+plugins:
+  # Authentication: API key in the `apikey` header; stripped before proxying so
+  # backends (and logs) never see the secret.
+  - name: key-auth
+    config:
+      key_names: [apikey]
+      key_in_header: true
+      key_in_query: false
+      key_in_body: false
+      hide_credentials: true
+
+  # Traffic control: default plan for every consumer.
+  - name: rate-limiting
+    config:
+      minute: 60
+      policy: local
+      limit_by: consumer
+      error_message: "Rate limit exceeded (60 requests/minute)."
+
+  - name: request-size-limiting
+    config:
+      allowed_payload_size: 1
+      size_unit: megabytes
+
+  # Correlation: one ID per request, forwarded upstream and echoed to the client.
+  - name: correlation-id
+    config:
+      header_name: X-Correlation-ID
+      generator: uuid
+      echo_downstream: true
+
+  # Distributed tracing: the gateway span becomes the root of the trace and the
+  # W3C `traceparent` header is injected for the backends to continue it.
+  - name: opentelemetry
+    config:
+      traces_endpoint: http://jaeger:4318/v1/traces
+      resource_attributes:
+        service.name: kong-gateway
+        service.namespace: comco
+      sampling_rate: 1.0
+      propagation:
+        default_format: w3c
+        extract: [w3c]
+        inject: [preserve]
+
+  # Metrics for monitoring (scrape http://localhost:8100/metrics).
+  - name: prometheus
+    config:
+      per_consumer: true
+      status_code_metrics: true
+      latency_metrics: true
+      bandwidth_metrics: true
+      upstream_health_metrics: true
+
+  # Structured access log (one JSON line per request) to container stdout.
+  - name: file-log
+    config:
+      path: /dev/stdout
+      reopen: false

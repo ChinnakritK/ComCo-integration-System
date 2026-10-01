@@ -1,0 +1,5 @@
+a2a have 4 Component
+1.Agent Card - A "business card": the agent's name, what it can do and where to reach it
+2.Message - The request that assigns work 
+3.Task - One unit of work, with an ID and a state    
+4.Artifact -The result of the task 

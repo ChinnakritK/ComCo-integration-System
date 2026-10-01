@@ -1,0 +1,328 @@
+openapi: 3.1.0
+info:
+  title: ComCo Customer API
+  summary: Customer master data for the ComCo Customer Service Integration Platform.
+  description: 'Owned by the **Customer Service**, backed by its own PostgreSQL database.
+
+
+    External consumers reach this API **only through the Kong API gateway** at `/api/v1/customers`
+    using an `apikey` header. All errors use RFC 7807 Problem Details (`application/problem+json`).'
+  version: 1.0.0
+servers:
+- url: http://localhost:8000/api/v1
+  description: Via Kong API gateway
+paths:
+  /customers:
+    get:
+      tags:
+      - customers
+      summary: List customers
+      operationId: list_customers
+      parameters:
+      - name: tier
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - $ref: '#/components/schemas/CustomerTier'
+          - type: 'null'
+          title: Tier
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - $ref: '#/components/schemas/CustomerStatus'
+          - type: 'null'
+          title: Status
+      - name: email
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Exact email match
+          title: Email
+        description: Exact email match
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 20
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Offset
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerPage'
+        '422':
+          description: Validation error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: Data store unavailable
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    post:
+      tags:
+      - customers
+      summary: Register a new customer
+      operationId: create_customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerCreate'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+        '409':
+          description: Conflict (e.g. email already registered)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: Data store unavailable
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /customers/{customer_id}:
+    get:
+      tags:
+      - customers
+      summary: Get a customer by ID
+      operationId: get_customer
+      parameters:
+      - name: customer_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^C\d{3,}$
+          description: Customer identifier
+          examples:
+          - C001
+          title: Customer Id
+        description: Customer identifier
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+        '404':
+          description: Customer not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: Data store unavailable
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+components:
+  schemas:
+    Customer:
+      properties:
+        customer_id:
+          type: string
+          title: Customer Id
+          examples:
+          - C001
+        first_name:
+          type: string
+          title: First Name
+        last_name:
+          type: string
+          title: Last Name
+        email:
+          type: string
+          title: Email
+        phone:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Phone
+        tier:
+          $ref: '#/components/schemas/CustomerTier'
+        status:
+          $ref: '#/components/schemas/CustomerStatus'
+        created_at:
+          type: string
+          title: Created At
+        updated_at:
+          type: string
+          title: Updated At
+      type: object
+      required:
+      - customer_id
+      - first_name
+      - last_name
+      - email
+      - phone
+      - tier
+      - status
+      - created_at
+      - updated_at
+      title: Customer
+    CustomerCreate:
+      properties:
+        first_name:
+          type: string
+          maxLength: 100
+          minLength: 1
+          title: First Name
+        last_name:
+          type: string
+          maxLength: 100
+          minLength: 1
+          title: Last Name
+        email:
+          type: string
+          format: email
+          title: Email
+        phone:
+          anyOf:
+          - type: string
+            pattern: ^\+?[0-9\- ]{7,20}$
+          - type: 'null'
+          title: Phone
+        tier:
+          $ref: '#/components/schemas/CustomerTier'
+          default: STANDARD
+      additionalProperties: false
+      type: object
+      required:
+      - first_name
+      - last_name
+      - email
+      title: CustomerCreate
+      example:
+        email: malee.s@example.com
+        first_name: Malee
+        last_name: Srisuk
+        phone: +66-81-555-0199
+        tier: STANDARD
+    CustomerPage:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Customer'
+          type: array
+          title: Items
+        total:
+          type: integer
+          title: Total
+        limit:
+          type: integer
+          title: Limit
+        offset:
+          type: integer
+          title: Offset
+      type: object
+      required:
+      - items
+      - total
+      - limit
+      - offset
+      title: CustomerPage
+    CustomerStatus:
+      type: string
+      enum:
+      - ACTIVE
+      - INACTIVE
+      title: CustomerStatus
+    CustomerTier:
+      type: string
+      enum:
+      - STANDARD
+      - GOLD
+      - PLATINUM
+      title: CustomerTier
+    Problem:
+      type: object
+      description: RFC 7807 Problem Details - the single error format used across
+        the platform.
+      required:
+      - type
+      - title
+      - status
+      - detail
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+          description: Stable machine-readable error code
+        correlation_id:
+          type: string
+        trace_id:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+              type:
+                type: string
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: apikey
+      description: Consumer API key, validated by the Kong gateway (key-auth plugin).
+security:
+- ApiKeyAuth: []

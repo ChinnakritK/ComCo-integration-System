@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comco-agentkit"
+version = "0.1.0"
+description = "Shared by the ComCo agents: tool registry, managed-API (Kong) client, A2A specialist agent server."
+requires-python = ">=3.11"
+# Also requires the sibling package comco-common (installed from libs/ in the Dockerfiles).
+dependencies = [
+    "httpx==0.28.1",
+    "tenacity==9.1.4",
+    "pydantic>=2.7,<3",
+    "a2a-sdk[http-server]==1.2.0",
+]
+
+[tool.setuptools]
+packages = ["comco_agentkit"]

@@ -1,0 +1,1 @@
+{"type":"https://api.comco.example/problems/gateway-error","title":"Rejected by API gateway","detail":"%s","request_id":"%s","source":"kong-gateway"}

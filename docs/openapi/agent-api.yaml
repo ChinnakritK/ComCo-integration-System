@@ -1,0 +1,373 @@
+openapi: 3.1.0
+info:
+  title: ComCo Agent API
+  summary: Natural-language access to customer and order information via a Coordinator
+    Agent.
+  description: 'The Coordinator Agent understands a request, plans which capabilities
+    are needed and orchestrates them. In `a2a` mode (default) each step is delegated
+    as an **A2A task** to the specialist agent whose Agent Card advertises the skill
+    (Customer Agent / Order Agent); the specialists call the **managed** APIs through
+    the Kong gateway. In `direct` mode the coordinator calls the managed APIs itself.
+    Business data is never read from databases directly and never fabricated: answers
+    are composed only from results, and missing/unavailable data is reported as such.'
+  version: 1.0.0
+servers:
+- url: http://localhost:8000/api/v1
+  description: Via Kong API gateway
+paths:
+  /agent/query:
+    post:
+      tags:
+      - agent
+      summary: Ask the Coordinator Agent
+      description: Always returns 200 for a handled request; the business outcome
+        is in `status`. `steps` shows which tools were selected and why, and `graph_path`
+        the LangGraph route taken.
+      operationId: query_agent
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentQuery'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentResponse'
+        '422':
+          description: Invalid request body
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /agent/capabilities:
+    get:
+      tags:
+      - agent
+      summary: What the agent can do (tools and examples)
+      operationId: capabilities
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Capabilities
+  /agent/agents:
+    get:
+      tags:
+      - agent
+      summary: 'A2A discovery: specialist agents and the skills in their Agent Cards'
+      operationId: agents
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Agents
+  /agent/a2a/tasks/{agent}/{task_id}:
+    get:
+      tags:
+      - agent
+      summary: 'A2A task status: fetch a delegated task (state, messages, artifacts)
+        from its agent'
+      operationId: a2a_task
+      parameters:
+      - name: agent
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Agent
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Task Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response A2A Task
+        '404':
+          description: Unknown agent or task
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: Agent unreachable
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /agent/graph:
+    get:
+      tags:
+      - agent
+      summary: The agent's LangGraph workflow as a Mermaid diagram
+      operationId: graph_diagram
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Graph Diagram
+components:
+  schemas:
+    AgentQuery:
+      properties:
+        query:
+          type: string
+          maxLength: 500
+          minLength: 1
+          title: Query
+      additionalProperties: false
+      type: object
+      required:
+      - query
+      title: AgentQuery
+      example:
+        query: Find customer C001 and tell me their latest order status.
+    AgentResponse:
+      properties:
+        query:
+          type: string
+          title: Query
+        status:
+          type: string
+          enum:
+          - completed
+          - completed_with_gaps
+          - not_found
+          - partial
+          - failed
+          - needs_clarification
+          - unsupported
+          title: Status
+          description: 'completed: everything answered · completed_with_gaps: answered,
+            some items do not exist · not_found: requested entity does not exist ·
+            partial: some data could not be retrieved · failed: nothing could be retrieved
+            · needs_clarification / unsupported: no tool applicable'
+        answer:
+          type: string
+          title: Answer
+          description: Human-readable answer composed ONLY from retrieved data
+        intent:
+          type: string
+          title: Intent
+        planner:
+          type: string
+          title: Planner
+        executor:
+          type: string
+          title: Executor
+        steps:
+          items:
+            $ref: '#/components/schemas/StepReport'
+          type: array
+          title: Steps
+        graph_path:
+          items:
+            type: string
+          type: array
+          title: Graph Path
+          description: LangGraph nodes visited, in order
+        data:
+          additionalProperties: true
+          type: object
+          title: Data
+          description: Raw business data returned by the tools (verbatim)
+        correlation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Correlation Id
+        trace_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Trace Id
+      type: object
+      required:
+      - query
+      - status
+      - answer
+      - intent
+      - planner
+      - executor
+      - steps
+      - graph_path
+      - data
+      title: AgentResponse
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    StepReport:
+      properties:
+        id:
+          type: string
+          title: Id
+        tool:
+          type: string
+          title: Tool
+        args:
+          additionalProperties: true
+          type: object
+          title: Args
+        reason:
+          type: string
+          title: Reason
+        depends_on:
+          items:
+            type: string
+          type: array
+          title: Depends On
+        outcome:
+          type: string
+          title: Outcome
+          description: ok | not_found | skipped | unavailable | rate_limited | unauthorized
+            | invalid | error
+        http_status:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Http Status
+        error_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error Code
+        detail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Detail
+        latency_ms:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Latency Ms
+        via:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Via
+        a2a:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: A2A
+          description: 'A2A delegation details: agent, task_id, context_id, final
+            task state'
+      type: object
+      required:
+      - id
+      - tool
+      - args
+      - reason
+      - depends_on
+      - outcome
+      title: StepReport
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+    Problem:
+      type: object
+      description: RFC 7807 Problem Details - the single error format used across
+        the platform.
+      required:
+      - type
+      - title
+      - status
+      - detail
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+          description: Stable machine-readable error code
+        correlation_id:
+          type: string
+        trace_id:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+              type:
+                type: string
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: apikey
+      description: Consumer API key, validated by the Kong gateway (key-auth plugin).
+security:
+- ApiKeyAuth: []

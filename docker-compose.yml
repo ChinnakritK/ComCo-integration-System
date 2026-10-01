@@ -1,0 +1,227 @@
+# ComCo Customer Service Integration Platform - local environment
+#
+#   docker compose up -d --build        (or: make up)
+#
+# Only the gateway and the observability UIs are published to the host.
+# Backend services, agents and databases are reachable ONLY inside the compose
+# networks, so every external call has to go through Kong - and so do the
+# agents' own calls to the business APIs.
+
+name: comco
+
+x-service-env: &service-env
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+  PUBLIC_BASE_URL: http://localhost:8000/api/v1
+  SEED_DATA: "true"
+  # Demo-only: lets the evaluator trigger timeouts / errors via request headers.
+  FAULT_INJECTION_ENABLED: ${FAULT_INJECTION_ENABLED:-true}
+
+services:
+  # --------------------------------------------------------------- data stores
+  customer-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: customers
+      POSTGRES_USER: customer_svc
+      POSTGRES_PASSWORD: ${CUSTOMER_DB_PASSWORD:-customer_pw}
+    volumes:
+      - customer-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U customer_svc -d customers"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [backend]
+
+  order-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: order_svc
+      POSTGRES_PASSWORD: ${ORDER_DB_PASSWORD:-order_pw}
+    volumes:
+      - order-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U order_svc -d orders"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [backend]
+
+  # --------------------------------------------------------------- backend APIs
+  customer-service:
+    build:
+      context: .
+      dockerfile: services/customer-service/Dockerfile
+    environment:
+      <<: *service-env
+      SERVICE_NAME: customer-service
+      DATABASE_URL: postgresql+asyncpg://customer_svc:${CUSTOMER_DB_PASSWORD:-customer_pw}@customer-db:5432/customers
+    depends_on:
+      customer-db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [backend, edge]
+
+  order-service:
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    environment:
+      <<: *service-env
+      SERVICE_NAME: order-service
+      DATABASE_URL: postgresql+asyncpg://order_svc:${ORDER_DB_PASSWORD:-order_pw}@order-db:5432/orders
+    depends_on:
+      order-db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [backend, edge]
+
+  # --------------------------------------------------------------- agents
+  coordinator-agent:
+    build:
+      context: .
+      dockerfile: agents/coordinator/Dockerfile
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_NAME: coordinator-agent
+      # a2a-sdk's internal spans report the normal end-of-queue signal (QueueShutDown)
+      # as an error; our own spans cover A2A tasks instead.
+      OTEL_INSTRUMENTATION_A2A_SDK_ENABLED: "false"
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      # a2a (default): delegate steps to the specialist agents discovered from their Agent Cards.
+      # direct: call the managed APIs from the coordinator itself (Phase 2 behaviour).
+      EXECUTION_MODE: ${EXECUTION_MODE:-a2a}
+      A2A_AGENT_URLS: http://customer-agent:8000,http://order-agent:8000
+      A2A_TIMEOUT_SECONDS: "12"
+      # In direct mode the agent reaches business data ONLY through the gateway, as its own consumer.
+      GATEWAY_URL: http://kong:8000/api/v1
+      AGENT_API_KEY: ${AGENT_API_KEY:-agent-platform-key}
+      TOOL_TIMEOUT_SECONDS: "8"
+      # Optional local LLM planner (start with: docker compose --profile llm up -d)
+      USE_LLM: ${USE_LLM:-false}
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      FAULT_INJECTION_ENABLED: ${FAULT_INJECTION_ENABLED:-true}
+    restart: unless-stopped
+    networks: [edge]
+
+  # A2A specialist agents: Agent Card at /.well-known/agent-card.json, JSON-RPC at /a2a.
+  # Each calls the business APIs through Kong with its own least-privilege consumer.
+  customer-agent:
+    build:
+      context: .
+      dockerfile: agents/customer-agent/Dockerfile
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_NAME: customer-agent
+      # a2a-sdk's internal spans report the normal end-of-queue signal (QueueShutDown)
+      # as an error; our own spans cover A2A tasks instead.
+      OTEL_INSTRUMENTATION_A2A_SDK_ENABLED: "false"
+      AGENT_PUBLIC_URL: http://customer-agent:8000
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      GATEWAY_URL: http://kong:8000/api/v1
+      AGENT_API_KEY: ${CUSTOMER_AGENT_API_KEY:-customer-agent-key}
+      FAULT_INJECTION_ENABLED: ${FAULT_INJECTION_ENABLED:-true}
+    restart: unless-stopped
+    networks: [edge]
+
+  order-agent:
+    build:
+      context: .
+      dockerfile: agents/order-agent/Dockerfile
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_NAME: order-agent
+      # a2a-sdk's internal spans report the normal end-of-queue signal (QueueShutDown)
+      # as an error; our own spans cover A2A tasks instead.
+      OTEL_INSTRUMENTATION_A2A_SDK_ENABLED: "false"
+      AGENT_PUBLIC_URL: http://order-agent:8000
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      GATEWAY_URL: http://kong:8000/api/v1
+      AGENT_API_KEY: ${ORDER_AGENT_API_KEY:-order-agent-key}
+      FAULT_INJECTION_ENABLED: ${FAULT_INJECTION_ENABLED:-true}
+    restart: unless-stopped
+    networks: [edge]
+
+  # Optional, only with `--profile llm`. Pull a model once:
+  #   docker compose exec ollama ollama pull llama3.2:3b
+  ollama:
+    image: ollama/ollama:latest
+    profiles: [llm]
+    volumes:
+      - ollama-models:/root/.ollama
+    networks: [edge]
+
+  # --------------------------------------------------------------- API gateway
+  kong:
+    # Kong OSS 3.9.x is the last line published as a free OSS image
+    # (see docs/adr/0002-api-gateway-kong.md).
+    image: kong:3.9.1
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_ADMIN_GUI_LISTEN: 0.0.0.0:8002
+      KONG_ADMIN_GUI_URL: http://localhost:8002
+      KONG_STATUS_LISTEN: 0.0.0.0:8100
+      KONG_PROXY_ACCESS_LOG: "off"          # the file-log plugin writes structured JSON instead
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ACCESS_LOG: "off"
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_LOG_LEVEL: notice
+      KONG_TRACING_INSTRUMENTATIONS: all
+      KONG_TRACING_SAMPLING_RATE: "1.0"
+      KONG_ERROR_TEMPLATE_JSON: /kong/error-template.json
+      KONG_HEADERS: latency_tokens,X-Kong-Request-Id
+      KONG_NGINX_WORKER_PROCESSES: "2"
+    volumes:
+      - ./gateway/kong.yml:/kong/kong.yml:ro
+      - ./gateway/error-template.json:/kong/error-template.json:ro
+    ports:
+      - "8000:8000"            # public API entry point
+      - "127.0.0.1:8001:8001"  # Admin API (read-only in DB-less mode) - localhost only
+      - "127.0.0.1:8002:8002"  # Kong Manager OSS UI - localhost only
+      - "8100:8100"            # status + Prometheus /metrics
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      customer-service:
+        condition: service_started
+      order-service:
+        condition: service_started
+      coordinator-agent:
+        condition: service_started
+      customer-agent:
+        condition: service_started
+      order-agent:
+        condition: service_started
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+    networks: [edge]
+
+  # --------------------------------------------------------------- observability
+  jaeger:
+    image: jaegertracing/jaeger:2.5.0
+    ports:
+      - "16686:16686"  # Jaeger UI
+    networks: [edge, backend]
+
+networks:
+  edge: {}      # gateway <-> services <-> tracing
+  backend: {}   # services <-> their databases (the gateway cannot reach the DBs)
+
+volumes:
+  customer-db-data: {}
+  order-db-data: {}
+  ollama-models: {}

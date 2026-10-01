@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comco-common"
+version = "0.1.0"
+description = "Shared cross-cutting concerns for ComCo services: RFC 7807 errors, correlation IDs, JSON logging, OpenTelemetry."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.46.0",
+    "sqlalchemy[asyncio]==2.1.1",
+    "structlog==26.1.0",
+    "opentelemetry-api==1.45.0",
+    "opentelemetry-sdk==1.45.0",
+    "opentelemetry-exporter-otlp-proto-http==1.45.0",
+    "opentelemetry-instrumentation-fastapi==0.66b0",
+    "opentelemetry-instrumentation-sqlalchemy==0.66b0",
+    "opentelemetry-instrumentation-httpx==0.66b0",
+]
+
+[tool.setuptools]
+packages = ["comco_common"]
